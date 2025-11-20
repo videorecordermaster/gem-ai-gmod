@@ -1,7 +1,7 @@
 {
   "name": "gmod-ai-backend",
   "version": "1.0.0",
-  "type": "module"
+  "type": "module",
   "dependencies": {
     "@google/generative-ai": "^0.12.0"
   }
