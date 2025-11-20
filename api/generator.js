@@ -1,8 +1,9 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 // === ДЕФОЛТНЫЙ СПИСОК ===
+// Точные названия моделей, которые мы выяснили
 const DEFAULT_MODELS = [
     "gemini-2.0-flash-lite-preview-02-05",
     "gemini-2.5-flash",
@@ -22,6 +23,7 @@ function cleanCode(text) {
 
 // Рекурсивная функция генерации
 async function tryGenerate(prompt, modelsList, modelIndex = 0) {
+    // Если перебрали все модели
     if (modelIndex >= modelsList.length) {
         throw new Error("Все модели перегружены (Rate Limits) или недоступны.");
     }
@@ -44,22 +46,25 @@ async function tryGenerate(prompt, modelsList, modelIndex = 0) {
         };
 
     } catch (error) {
+        // Проверяем на лимиты (429) или перегрузку (503)
         const isRateLimit = error.message.includes("429") || 
                             error.message.includes("503") || 
                             error.message.includes("RESOURCE_EXHAUSTED");
 
         if (isRateLimit) {
             console.warn(`Model ${modelName} hit rate limit. Switching...`);
+            // Пробуем следующую модель
             return tryGenerate(prompt, modelsList, modelIndex + 1);
         } else {
+            // Если ошибка другая — пробрасываем её
             throw error;
         }
     }
 }
 
-// ГЛАВНЫЙ ОБРАБОТЧИК (Handler)
-module.exports = async (req, res) => {
-    // CORS заголовки
+// ВАЖНО: Используем export default для ESM
+export default async function handler(req, res) {
+    // Настройка CORS
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
@@ -76,15 +81,21 @@ module.exports = async (req, res) => {
 
     try {
         let body = req.body;
+
+        // Костыль для GMod, если он прислал JSON строкой
         if (typeof body === 'string') {
-            try { body = JSON.parse(body); } catch (e) {}
+            try {
+                body = JSON.parse(body);
+            } catch (e) {}
         }
 
         const prompt = body.prompt;
+
         if (!prompt) {
             return res.status(400).json({ error: "No prompt provided" });
         }
 
+        // Берем список моделей из запроса или дефолтный
         const modelsList = (body.models && Array.isArray(body.models) && body.models.length > 0) 
                            ? body.models 
                            : DEFAULT_MODELS;
@@ -97,4 +108,4 @@ module.exports = async (req, res) => {
         console.error("Server Error:", error);
         res.status(500).json({ error: error.message || "Internal Server Error" });
     }
-};
+}
