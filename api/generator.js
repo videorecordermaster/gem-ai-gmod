@@ -1,16 +1,15 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const genAI = new GoogleGenerativeAI(// ... imports
 
-// === ДЕФОЛТНЫЙ СПИСОК ===
-// Используется, если Lua файл старый или не прислал список.
-// Порядок: Скорость (30 RPM) -> Живучесть (1000 RPD) -> Ум (Pro)
+// === ДЕФОЛТНЫЙ СПИСОК (Синхронизирован с твоим доступом) ===
 const DEFAULT_MODELS = [
-    "gemini-2.0-flash-lite-preview-02-05", 
-    "gemini-2.5-flash-lite-preview",       
-    "gemini-2.5-flash",                    
-    "gemini-2.5-pro"                       
+    "gemini-2.0-flash-lite-preview-02-05",
+    "gemini-2.5-flash",
+    "gemini-2.5-pro"
 ];
+
+// ... остальной код (функция tryGenerate и handler)
 
 // Функция очистки кода
 function cleanCode(text) {
