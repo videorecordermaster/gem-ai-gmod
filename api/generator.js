@@ -2,39 +2,46 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// ПРИОРИТЕТ МОДЕЛЕЙ
-// Мы идем сверху вниз. Если первая выдает ошибку лимитов (429) или перегрузку (503), пробуем следующую.
-const MODEL_PRIORITY = [
-    "gemini-2.5-flash",       // 1. Баланс (10 RPM)
-    "gemini-2.5-pro",         // 2. Умная, но медленная (2 RPM) - на подстраховку
-    "gemini-2.0-flash-lite-preview-02-05" // 3. "Глупая", но быстрая (30 RPM) - последняя надежда
+// === ДЕФОЛТНЫЙ СПИСОК ===
+// Используется, если Lua файл старый или не прислал список.
+// Порядок: Скорость (30 RPM) -> Живучесть (1000 RPD) -> Ум (Pro)
+const DEFAULT_MODELS = [
+    "gemini-2.0-flash-lite-preview-02-05", 
+    "gemini-2.5-flash-lite-preview",       
+    "gemini-2.5-flash",                    
+    "gemini-2.5-pro"                       
 ];
 
-// Функция очистки кода от Markdown (```lua ... ```) прямо на бэкенде
+// Функция очистки кода
 function cleanCode(text) {
+    // Сначала ищем блок lua
     const luaMatch = text.match(/```lua([\s\S]*?)```/);
     if (luaMatch) return luaMatch[1].trim();
     
+    // Если нет, любой блок кода
     const genericMatch = text.match(/```([\s\S]*?)```/);
     if (genericMatch) return genericMatch[1].trim();
     
-    return text; // Возвращаем как есть, если блоков кода нет
+    // Если блоков нет, возвращаем как есть
+    return text; 
 }
 
-// Рекурсивная функция попытки генерации
-async function tryGenerate(prompt, modelIndex = 0) {
-    if (modelIndex >= MODEL_PRIORITY.length) {
-        throw new Error("Все модели перегружены (All models exhausted).");
+// Рекурсивная функция генерации
+// ТЕПЕРЬ ОНА ПРИНИМАЕТ modelsList ИЗ АРГУМЕНТОВ
+async function tryGenerate(prompt, modelsList, modelIndex = 0) {
+    // Если перебрали все модели
+    if (modelIndex >= modelsList.length) {
+        throw new Error("Все модели перегружены (Rate Limits) или недоступны.");
     }
 
-    const modelName = MODEL_PRIORITY[modelIndex];
-    console.log(`Attempting generation with model: ${modelName}`);
+    const modelName = modelsList[modelIndex];
+    console.log(`[Attempt ${modelIndex + 1}/${modelsList.length}] Using model: ${modelName}`);
 
     try {
         const model = genAI.getGenerativeModel({ model: modelName });
         
-        // Добавляем жесткое требование писать только код
-        const finalPrompt = `Write ONLY working Garry's Mod Lua code (GLua). No explanations. No markdown outside code blocks. Request: ${prompt}`;
+        // Жесткий системный промпт для страховки (хотя Lua тоже шлет свой)
+        const finalPrompt = `Write ONLY working Garry's Mod Lua code (GLua). Request: ${prompt}`;
 
         const result = await model.generateContent(finalPrompt);
         const response = await result.response;
@@ -43,31 +50,32 @@ async function tryGenerate(prompt, modelIndex = 0) {
         return {
             success: true,
             model: modelName,
-            raw_text: text,
             clean_code: cleanCode(text)
         };
 
     } catch (error) {
-        // Проверяем, является ли ошибка лимитом (429) или перегрузкой (503)
-        // Google API часто возвращает ошибку в message или status
-        const isRateLimit = error.message.includes("429") || error.message.includes("503") || error.message.includes("RESOURCE_EXHAUSTED");
+        // Проверяем ошибки лимитов
+        const isRateLimit = error.message.includes("429") || 
+                            error.message.includes("503") || 
+                            error.message.includes("RESOURCE_EXHAUSTED");
 
         if (isRateLimit) {
-            console.warn(`Model ${modelName} failed (Rate Limit). Switching to next...`);
-            return tryGenerate(prompt, modelIndex + 1); // Пробуем следующую модель
+            console.warn(`Model ${modelName} hit rate limit. Switching...`);
+            // Пробуем следующую модель из переданного списка
+            return tryGenerate(prompt, modelsList, modelIndex + 1);
         } else {
-            // Если ошибка другая (например, неверный API ключ или Bad Request), пробрасываем её
+            // Если ошибка фатальная (например, плохой промпт), пробрасываем
             throw error;
         }
     }
 }
 
 export default async function handler(req, res) {
-    // CORS заголовки
+    // Настройка CORS для GMod
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-    res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
     if (req.method === 'OPTIONS') {
         res.status(200).end();
@@ -79,24 +87,30 @@ export default async function handler(req, res) {
     }
 
     try {
-        let { prompt } = req.body;
+        let body = req.body;
 
-        // Парсинг тела запроса, если GMod прислал строку
-        if (!prompt && typeof req.body === 'string') {
+        // Костыль для GMod (иногда он шлет JSON как строку)
+        if (typeof body === 'string') {
             try {
-                const parsed = JSON.parse(req.body);
-                prompt = parsed.prompt;
+                body = JSON.parse(body);
             } catch (e) {}
         }
+
+        const prompt = body.prompt;
 
         if (!prompt) {
             return res.status(400).json({ error: "No prompt provided" });
         }
 
-        // Запускаем умную генерацию с перебором моделей
-        const result = await tryGenerate(prompt);
+        // === ВАЖНЫЙ МОМЕНТ ===
+        // Берем список моделей из запроса Lua. Если его нет — берем дефолтный.
+        const modelsList = (body.models && Array.isArray(body.models) && body.models.length > 0) 
+                           ? body.models 
+                           : DEFAULT_MODELS;
 
-        // Возвращаем JSON с кодом и именем модели
+        // Запускаем генерацию
+        const result = await tryGenerate(prompt, modelsList);
+
         res.status(200).json(result);
 
     } catch (error) {
@@ -104,4 +118,3 @@ export default async function handler(req, res) {
         res.status(500).json({ error: error.message || "Internal Server Error" });
     }
 }
-
