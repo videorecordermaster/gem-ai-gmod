@@ -1,34 +1,27 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-const genAI = new GoogleGenerativeAI(// ... imports
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// === ДЕФОЛТНЫЙ СПИСОК (Синхронизирован с твоим доступом) ===
+// === ДЕФОЛТНЫЙ СПИСОК ===
 const DEFAULT_MODELS = [
     "gemini-2.0-flash-lite-preview-02-05",
     "gemini-2.5-flash",
     "gemini-2.5-pro"
 ];
 
-// ... остальной код (функция tryGenerate и handler)
-
 // Функция очистки кода
 function cleanCode(text) {
-    // Сначала ищем блок lua
     const luaMatch = text.match(/```lua([\s\S]*?)```/);
     if (luaMatch) return luaMatch[1].trim();
     
-    // Если нет, любой блок кода
     const genericMatch = text.match(/```([\s\S]*?)```/);
     if (genericMatch) return genericMatch[1].trim();
     
-    // Если блоков нет, возвращаем как есть
     return text; 
 }
 
 // Рекурсивная функция генерации
-// ТЕПЕРЬ ОНА ПРИНИМАЕТ modelsList ИЗ АРГУМЕНТОВ
 async function tryGenerate(prompt, modelsList, modelIndex = 0) {
-    // Если перебрали все модели
     if (modelIndex >= modelsList.length) {
         throw new Error("Все модели перегружены (Rate Limits) или недоступны.");
     }
@@ -38,9 +31,7 @@ async function tryGenerate(prompt, modelsList, modelIndex = 0) {
 
     try {
         const model = genAI.getGenerativeModel({ model: modelName });
-        
-        // Жесткий системный промпт для страховки (хотя Lua тоже шлет свой)
-        const finalPrompt = `Write ONLY working Garry's Mod Lua code (GLua). Request: ${prompt}`;
+        const finalPrompt = `Write ONLY working Garry's Mod Lua code (GLua). No explanations. Request: ${prompt}`;
 
         const result = await model.generateContent(finalPrompt);
         const response = await result.response;
@@ -53,24 +44,22 @@ async function tryGenerate(prompt, modelsList, modelIndex = 0) {
         };
 
     } catch (error) {
-        // Проверяем ошибки лимитов
         const isRateLimit = error.message.includes("429") || 
                             error.message.includes("503") || 
                             error.message.includes("RESOURCE_EXHAUSTED");
 
         if (isRateLimit) {
             console.warn(`Model ${modelName} hit rate limit. Switching...`);
-            // Пробуем следующую модель из переданного списка
             return tryGenerate(prompt, modelsList, modelIndex + 1);
         } else {
-            // Если ошибка фатальная (например, плохой промпт), пробрасываем
             throw error;
         }
     }
 }
 
-export default async function handler(req, res) {
-    // Настройка CORS для GMod
+// ГЛАВНЫЙ ОБРАБОТЧИК (Handler)
+module.exports = async (req, res) => {
+    // CORS заголовки
     res.setHeader('Access-Control-Allow-Credentials', true);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
@@ -87,27 +76,19 @@ export default async function handler(req, res) {
 
     try {
         let body = req.body;
-
-        // Костыль для GMod (иногда он шлет JSON как строку)
         if (typeof body === 'string') {
-            try {
-                body = JSON.parse(body);
-            } catch (e) {}
+            try { body = JSON.parse(body); } catch (e) {}
         }
 
         const prompt = body.prompt;
-
         if (!prompt) {
             return res.status(400).json({ error: "No prompt provided" });
         }
 
-        // === ВАЖНЫЙ МОМЕНТ ===
-        // Берем список моделей из запроса Lua. Если его нет — берем дефолтный.
         const modelsList = (body.models && Array.isArray(body.models) && body.models.length > 0) 
                            ? body.models 
                            : DEFAULT_MODELS;
 
-        // Запускаем генерацию
         const result = await tryGenerate(prompt, modelsList);
 
         res.status(200).json(result);
@@ -116,4 +97,4 @@ export default async function handler(req, res) {
         console.error("Server Error:", error);
         res.status(500).json({ error: error.message || "Internal Server Error" });
     }
-}
+};
